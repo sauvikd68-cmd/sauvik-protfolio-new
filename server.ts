@@ -4,7 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import fs from 'fs';
 
 dotenv.config();
@@ -41,10 +41,10 @@ async function generateContentWithRetryAndFallback(options: {
   primaryModel?: string;
 }): Promise<any> {
   const primaryModel = options.primaryModel || "gemini-3.5-flash";
-  const backupModels = ["gemini-3.1-flash-lite", "gemini-flash-latest"];
+  const backupModels = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
   const allModels = [primaryModel, ...backupModels];
   
-  const maxRetries = 2; // Reduced to 2 retries to speed up fallback transitions
+  const maxRetries = 3; // Retry up to 3 times per model as requested
   let lastError: any = null;
 
   console.log(`[SauvikAI Engine] Initiating content generation API. Requests logged.`);
@@ -52,20 +52,33 @@ async function generateContentWithRetryAndFallback(options: {
   for (const model of allModels) {
     console.log(`[SauvikAI Engine] Processing request with model choice: ${model}`);
     
+    // Copy config to avoid mutating original configurations
+    const modelConfig = { ...(options.config || {}) };
+    
+    // Low latency optimization: Gemini 3 models (heavy in reasoning) will use low thinking level to speed up generation
+    if (model.startsWith("gemini-3")) {
+      modelConfig.thinkingConfig = {
+        thinkingLevel: ThinkingLevel.LOW
+      };
+    } else {
+      // Non-Gemini 3 models do not support thinkingConfig
+      delete modelConfig.thinkingConfig;
+    }
+    
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       let timeoutId: any = null;
       try {
-        console.log(`[SauvikAI Engine] Sending API request -> [Model: ${model}] [Attempt: ${attempt}/${maxRetries}]`);
+        console.log(`[SauvikAI Engine][API Call] Sending request -> [Model: ${model}] [Attempt: ${attempt}/${maxRetries}]`);
         
         const client = getGoogleGenAIClient();
         
-        // Dynamic timeout: 12s for primary model to keep it fast, 10s for backup models to prevent hanging
-        const timeoutMs = model === primaryModel ? 12000 : 10000;
+        // Dynamic timeout: 15s for primary model to allow healthy answers, 12s for backup models
+        const timeoutMs = model === primaryModel ? 15000 : 12000;
         
         const apiCallPromise = client.models.generateContent({
           model: model,
           contents: options.contents,
-          config: options.config || {}
+          config: modelConfig
         });
 
         const timeoutPromise = new Promise<never>((_, reject) => {
@@ -125,6 +138,65 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// --- Robust Request/Response Tracing & Conversation Flow Logger Middleware ---
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  const requestId = Math.random().toString(36).substring(2, 9).toUpperCase();
+  
+  console.log(`\n--- Incoming Request [ID: ${requestId}] ---`);
+  console.log(`[HTTP] ${req.method} ${req.url}`);
+  console.log(`[Headers]`, JSON.stringify({
+    'user-agent': req.headers['user-agent'],
+    'content-type': req.headers['content-type']
+  }));
+  
+  if (Object.keys(req.query).length > 0) {
+    console.log(`[Query String]`, JSON.stringify(req.query));
+  }
+  
+  if (req.body && Object.keys(req.body).length > 0) {
+    const logBody = { ...req.body };
+    // Guard potential sensitive tokens or sanitize layout
+    if (logBody.password) logBody.password = '🔑 ******';
+    if (logBody.history && Array.isArray(logBody.history)) {
+      logBody.history = `${logBody.history.length} conversation messages`;
+    }
+    if (logBody.message && typeof logBody.message === 'string' && logBody.message.length > 250) {
+      logBody.message = logBody.message.substring(0, 250) + '... (truncated for clean logging)';
+    }
+    console.log(`[Payload]`, JSON.stringify(logBody, null, 2));
+  }
+
+  // Intercept response sending to log response duration & state
+  const originalSend = res.send;
+  res.send = function (body): any {
+    const elapsed = Date.now() - startTime;
+    console.log(`\n--- Outgoing Response [ID: ${requestId}] ---`);
+    console.log(`[Status] ${res.statusCode} | [Duration] ${elapsed}ms`);
+    
+    try {
+      if (typeof body === 'string') {
+        const parsed = JSON.parse(body);
+        const reportBody = { ...parsed };
+        if (reportBody.text && typeof reportBody.text === 'string' && reportBody.text.length > 250) {
+          reportBody.text = reportBody.text.substring(0, 250) + '... (truncated response copy)';
+        }
+        console.log(`[Response Data]`, JSON.stringify(reportBody, null, 2));
+      } else {
+        console.log(`[Response Stream/Buffer] Binary or non-parsed body format`);
+      }
+    } catch (e) {
+      // Body is plain text or HTML
+      const preview = String(body).substring(0, 150);
+      console.log(`[Response Raw Preview] ${preview}${preview.length >= 150 ? '...' : ''}`);
+    }
+    console.log(`-------------------------------------------\n`);
+    return originalSend.apply(this, arguments as any);
+  };
+
+  next();
+});
 
 // Initialize Firebase Client SDK in Node for backend Firestore connection
 let db: any = null;
@@ -613,6 +685,25 @@ Structure the output cleanly in beautiful markdown format appropriate for high-f
     console.error('Error in build-resume API:', error);
     return res.status(500).json({ success: false, error: error.message || 'Error occurred.' });
   }
+});
+
+// --- Global Robust Error Handling Middleware ---
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error(`\n===========================================`);
+  console.error(`[Error Handler][SYSTEM FAILURE] Route crashed: ${req.method} ${req.url}`);
+  console.error(`Message: ${err?.message || 'No error message specified'}`);
+  if (err?.stack) {
+    console.error(`Stack trace:\n${err.stack}`);
+  }
+  console.error(`===========================================\n`);
+
+  res.status(500).json({
+    success: false,
+    error: 'SauvikAI backend is temporarily experiencing high volumes or connection timeouts.',
+    message: err?.message || 'Internal API connectivity error',
+    fallbackStatus: 'Reconnecting / Fallback triggers active',
+    directContact: 'sauvikd68@gmail.com'
+  });
 });
 
 // Vite middleware setup or static asset serving

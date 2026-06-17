@@ -290,6 +290,7 @@ export const SauvikAISection = ({ isDark, toggleTheme }: SauvikAIProps) => {
   // Single inputs & loading states
   const [currentInput, setCurrentInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [retryCount, setRetryCount] = useState<number>(0);
   const [searchHistoryQuery, setSearchHistoryQuery] = useState('');
 
   // Audio / voice feedback simulations
@@ -620,6 +621,7 @@ export const SauvikAISection = ({ isDark, toggleTheme }: SauvikAIProps) => {
 
     for (let clientAttempt = 1; clientAttempt <= clientMaxRetries; clientAttempt++) {
       try {
+        setRetryCount(clientAttempt);
         console.log(`[Client Chatbot] Dispatching request - Attempt ${clientAttempt}/${clientMaxRetries}`);
         const chatHistoryForAPI = updatedMessages.map(m => ({
           sender: m.sender,
@@ -644,6 +646,7 @@ export const SauvikAISection = ({ isDark, toggleTheme }: SauvikAIProps) => {
         if (data.success && data.text) {
           responseText = data.text;
           apiSuccess = true;
+          setRetryCount(0); // Reset retryCount state on success
           break; // Exit retry loop on success!
         } else {
           throw new Error(data.error || 'Server responded with success: false');
@@ -711,6 +714,7 @@ export const SauvikAISection = ({ isDark, toggleTheme }: SauvikAIProps) => {
       console.error('Failure saving state:', innerErr);
     } finally {
       setIsGenerating(false);
+      setRetryCount(0); // Reset retry tracker
     }
   };
 
@@ -1368,13 +1372,20 @@ export const SauvikAISection = ({ isDark, toggleTheme }: SauvikAIProps) => {
                     <div className="p-2 rounded-xl bg-white/5 text-brand-purple border border-white/10 h-fit">
                       <Bot size={13} className="animate-spin" />
                     </div>
-                    <div className="px-4 py-2.5 bg-white/5 border border-glass-border rounded-2xl rounded-tl-none text-xs text-brand-purple italic tracking-wider">
-                      {getLoc('voice_end')}
-                      <span className="inline-flex gap-1 pl-1">
-                        <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.3s]" />
-                        <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.15s]" />
-                        <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce" />
-                      </span>
+                    <div className="px-4 py-2.5 bg-white/5 border border-glass-border rounded-2xl rounded-tl-none text-xs text-brand-purple italic tracking-wider flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5">
+                        {getLoc('voice_end')}
+                        <span className="inline-flex gap-1">
+                          <span className="w-1 h-1 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.3s]" />
+                          <span className="w-1 h-1 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.15s]" />
+                          <span className="w-1 h-1 bg-brand-purple rounded-full animate-bounce" />
+                        </span>
+                      </div>
+                      {retryCount > 1 && (
+                        <span className="text-[10px] text-amber-400 font-mono font-medium animate-pulse">
+                          ⚠️ {selectedLangMode === 'bn' ? `রিলিংকিং করা হচ্ছে... রিকানেকশন চেষ্টা ${retryCount}/৩` : `Reconnecting... attempt ${retryCount}/3`}
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1774,13 +1785,20 @@ export const SauvikAISection = ({ isDark, toggleTheme }: SauvikAIProps) => {
                             <Bot size={18} />
                           </div>
                           <div className="space-y-1 text-left max-w-lg">
-                            <div className="px-5 py-4 bg-white/5 border border-glass-border rounded-3xl rounded-tl-none text-xs italic text-brand-purple font-mono flex items-center gap-2">
-                              {getLoc('voice_end')}
-                              <div className="flex gap-1">
-                                <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.3s]" />
-                                <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.15s]" />
-                                <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce" />
+                            <div className="px-5 py-4 bg-white/5 border border-glass-border rounded-3xl rounded-tl-none text-xs italic text-brand-purple font-mono flex flex-col gap-1.5 justify-start items-start">
+                              <div className="flex items-center gap-2">
+                                {getLoc('voice_end')}
+                                <div className="flex gap-1">
+                                  <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.3s]" />
+                                  <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce [animation-delay:-0.15s]" />
+                                  <span className="w-1.5 h-1.5 bg-brand-purple rounded-full animate-bounce" />
+                                </div>
                               </div>
+                              {retryCount > 1 && (
+                                <span className="text-[10px] text-amber-400 font-medium tracking-wide animate-pulse mt-0.5 flex items-center gap-1">
+                                  ⚠️ {selectedLangMode === 'bn' ? `পুনরায় সংযুক্ত হওয়ার চেষ্টা: ${retryCount}/৩` : `Reconnecting to gateway: attempt ${retryCount}/3`}
+                                </span>
+                              )}
                             </div>
                           </div>
                         </motion.div>
